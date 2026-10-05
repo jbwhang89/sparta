@@ -23,6 +23,15 @@ ENCODINGS = ["utf-8-sig", "cp949", "latin-1"]
 
 
 def detect_encoding(path):
+    with open(path, "rb") as f:
+        head = f.read(4096)
+    if head[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        return "utf-16"
+    if b"\x00" in head:  # BOM 없는 UTF-16 추정
+        if head[1::2].count(0) > len(head) // 4:
+            return "utf-16-le"
+        if head[0::2].count(0) > len(head) // 4:
+            return "utf-16-be"
     for enc in ENCODINGS:
         try:
             with open(path, encoding=enc, newline="") as f:
@@ -34,23 +43,39 @@ def detect_encoding(path):
     return "latin-1"
 
 
+def lines(path, enc):
+    """줄 단위로 읽으면서 NUL 문자를 제거합니다."""
+    with open(path, encoding=enc, errors="replace", newline="") as f:
+        for line in f:
+            yield line.replace("\x00", "")
+
+
 def read_header(path, enc):
-    with open(path, encoding=enc, newline="") as f:
-        return next(csv.reader(f), [])
+    return next(csv.reader(lines(path, enc)), [])
 
 
 def merge(folder, out_name, out_dir, max_bytes):
     folder = Path(folder)
-    files = sorted(folder.rglob("*.csv"))
-    if not files:
+    all_files = sorted(folder.rglob("*.csv"))
+    if not all_files:
         print(f"[건너뜀] CSV 없음: {folder}")
         return
-    print(f"\n== {folder} ({len(files)}개 파일)")
+    print(f"\n== {folder} ({len(all_files)}개 파일)")
 
-    encs = {p: detect_encoding(p) for p in files}
-    columns = []
-    for p in files:
-        for c in read_header(p, encs[p]):
+    files, encs, columns, skipped = [], {}, [], []
+    for p in all_files:
+        try:
+            enc = detect_encoding(p)
+            header = read_header(p, enc)
+        except (OSError, csv.Error) as e:
+            skipped.append((p, e))
+            continue
+        if not header:
+            skipped.append((p, "빈 파일"))
+            continue
+        files.append(p)
+        encs[p] = enc
+        for c in header:
             if c not in columns:
                 columns.append(c)
     columns.append("source_file")
@@ -73,8 +98,8 @@ def merge(folder, out_name, out_dir, max_bytes):
     total = 0
     for p in files:
         rel = str(p.relative_to(folder))
-        with open(p, encoding=encs[p], newline="") as f:
-            for row in csv.DictReader(f):
+        try:
+            for row in csv.DictReader(lines(p, encs[p])):
                 row.pop(None, None)  # 헤더보다 열이 많은 줄의 초과분 제거
                 row["source_file"] = rel
                 writer.writerow(row)
@@ -84,6 +109,8 @@ def merge(folder, out_name, out_dir, max_bytes):
                     written = out.tell()
                     if written >= max_bytes:
                         open_part()
+        except (OSError, csv.Error) as e:
+            skipped.append((p, f"읽다가 중단: {e}"))
     out.close()
 
     # 파트가 1개뿐이면 _part1 제거
@@ -91,6 +118,10 @@ def merge(folder, out_name, out_dir, max_bytes):
         src = out_dir / f"{out_name}_part1.csv"
         src.replace(out_dir / f"{out_name}.csv")
     print(f"  완료: {total:,}행, {part}개 파일")
+    if skipped:
+        print(f"  [주의] 문제가 있어 건너뛴/중단된 파일 {len(skipped)}개:")
+        for p, why in skipped[:50]:
+            print(f"    - {p.name}: {why}")
 
 
 def main():
