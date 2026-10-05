@@ -11,10 +11,9 @@
 """
 import argparse
 import csv
-import sys
 from pathlib import Path
 
-csv.field_size_limit(sys.maxsize)
+csv.field_size_limit(2**31 - 1)  # Windows C long 한계
 
 JOBS = [
     (r"C:\Users\korea\OneDrive\연구\GIS\fishing_byvessel", "fishing_byvessel_merged"),
